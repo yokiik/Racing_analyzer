@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from setup_report import build_report, format_report
+from analyze_session import write_analysis
 
 
 WHEELS = ("fl", "fr", "rl", "rr")
@@ -170,6 +171,15 @@ class Recorder:
         self._metadata()
         print(f"\nSaved {path.name}: {self.rows} samples" +
               (f", {lap_ms / 1000:.3f}s" if crossed and lap_ms else ""))
+        if (complete or (self.directory / 'analysis.json').exists()) and self.identity[1] == "monza" and not self.demo:
+            try:
+                report = write_analysis(self.directory)
+                print(f"Corner report: {self.directory / 'report.html'}")
+                if report['reference_file']:
+                    print(f"Reference: {report['reference_file']}")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # Analysis failure must never lose recorded telemetry or stop a lap.
+                print(f"Analysis unavailable (telemetry saved): {error}")
 
     def reset(self, reason="disconnected"):
         self._finish(reason=reason)

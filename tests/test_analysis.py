@@ -191,6 +191,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report['reference_file'], 'lap_02.csv')
         self.assertTrue((recorder.directory / 'report.html').exists())
         recorder.close()
+        self.assertTrue((recorder.directory / 'ai_analysis.zip').is_file())
         report = json.loads((recorder.directory / 'analysis.json').read_text())
         self.assertTrue(any(x['file'] == 'lap_03.partial.csv' for x in report['excluded']))
 

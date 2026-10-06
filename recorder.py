@@ -11,6 +11,7 @@ from pathlib import Path
 
 from setup_report import build_report, format_report
 from analyze_session import write_analysis
+from export_session import export_session
 
 
 WHEELS = ("fl", "fr", "rl", "rr")
@@ -184,7 +185,13 @@ class Recorder:
                 print(f"Analysis unavailable (telemetry saved): {error}")
 
     def reset(self, reason="disconnected"):
+        had_open_lap = self.file is not None
         self._finish(reason=reason)
+        if had_open_lap and not self.demo:
+            try:
+                print(f"AI analysis package: {export_session(self.directory)}")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f"Export unavailable (telemetry saved): {error}")
         self.identity = None
         self.previous = None
         self.message = "Waiting for session"

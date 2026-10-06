@@ -144,6 +144,12 @@ class Recorder:
             return
         if not car or not track:
             return
+        # ACC may clear the physics page before graphics leaves LIVE. Skip that
+        # empty page, but retain a stationary car or a legitimately stopped engine.
+        if (sample["rpm"] == 0 and sample["speed_kmh"] == 0 and sample["fuel"] == 0
+                and all(sample[f"tyre_pressure_{wheel}"] <= 0 for wheel in WHEELS)
+                and all(sample[f"tyre_core_temp_c_{wheel}"] <= 0 for wheel in WHEELS)):
+            return
         identity = (car, track, graphics.session, graphics.sessionIndex)
         if identity != self.identity:
             self.reset("session_changed")

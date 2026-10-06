@@ -95,6 +95,28 @@ class RecorderTests(unittest.TestCase):
         sample = telemetry_sample(Physics(), g)
         self.assertEqual([sample[k] for k in ("x", "y", "z")], [1, 2, 3])
 
+    def test_empty_physics_snapshot_is_skipped_but_stopped_engine_is_kept(self):
+        self.feed(2, 40000)
+        previous = self.recorder.previous.copy()
+        g = Graphics(status=2, session=0, completedLaps=1, iCurrentTime=40050,
+                     isValidLap=1, packet_id=100000)
+        self.recorder.accept("porsche", "monza", g,
+                             telemetry_sample(Physics(packet_id=100000), g))
+        self.assertEqual(self.recorder.rows, 1)
+        self.assertEqual(self.recorder.previous, previous)
+        physics = Physics(packet_id=100001, gear=1)
+        physics.wheelPressure[:] = [26, 26, 26, 26]
+        physics.TyreCoreTemp[:] = [70, 70, 70, 70]
+        g.packet_id = 100001
+        self.recorder.accept("porsche", "monza", g, telemetry_sample(physics, g))
+        self.assertEqual(self.recorder.rows, 2)
+        directory = self.recorder.directory
+        self.recorder.close()
+        with (directory / "lap_01.partial.csv").open() as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(float(rows[-1]["tyre_pressure_fl"]), 26)
+
     def test_best_retains_faster_lap(self):
         self.feed(1, 89000)
         self.full_lap()

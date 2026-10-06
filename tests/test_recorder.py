@@ -117,6 +117,43 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(float(rows[-1]["tyre_pressure_fl"]), 26)
 
+    def test_setup_copy_and_per_lap_setting_changes(self):
+        source = Path(self.temp.name) / "my_monza.json"
+        original = b'{"carName":"porsche_992_gt3_r","basicSetup":{"electronics":{"tC1":3}}}'
+        source.write_bytes(original)
+        r = Recorder(Path(self.temp.name) / "recordings", setup_path=source)
+        self.addCleanup(r.close)
+        g = Graphics(status=2, session=0, iCurrentTime=500, TC=3, TCCUT=2,
+                     ABS=4, EngineMap=1, isValidLap=1, packet_id=1)
+        p = Physics(speed=184, brakeBias=0.55, fuel=40, packet_id=1)
+        r.accept("porsche_992_gt3_r", "monza", g, telemetry_sample(p, g))
+        source.write_text('{}')  # Recorded copy must remain the declared launch snapshot.
+        g.iCurrentTime = 550
+        g.packet_id = p.packet_id = 2
+        g.TC = 4
+        p.brakeBias = 0.56
+        r.accept("porsche_992_gt3_r", "monza", g, telemetry_sample(p, g))
+        r.close()
+        data = json.loads((r.directory / "session.json").read_text())
+        self.assertEqual((r.directory / "setup.json").read_bytes(), original)
+        lap = data['laps'][0]
+        self.assertEqual(lap['setup']['label'], 'my_monza')
+        self.assertFalse(lap['setup']['active_in_game_verified'])
+        self.assertEqual(lap['settings_start']['tc_level'], 3)
+        self.assertEqual(lap['settings_end']['tc_level'], 4)
+        self.assertEqual(lap['settings_end']['brake_bias_raw'], 0.56)
+        self.assertEqual(len(lap['settings_changes']), 1)
+        self.assertEqual(lap['fuel_at_recording_start_raw'], 40)
+        with (r.directory / lap['file']).open() as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([row['tc_level'] for row in rows], ['3', '4'])
+
+    def test_invalid_setup_is_rejected(self):
+        source = Path(self.temp.name) / 'invalid.json'
+        source.write_text('[]')
+        with self.assertRaises(ValueError):
+            Recorder(self.temp.name, setup_path=source)
+
     def test_best_retains_faster_lap(self):
         self.feed(1, 89000)
         self.full_lap()

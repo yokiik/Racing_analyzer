@@ -1,6 +1,7 @@
 """CSV recording and lap boundaries, independent of Windows shared memory."""
 
 import csv
+import hashlib
 import json
 import re
 import shutil
@@ -10,6 +11,7 @@ from pathlib import Path
 
 
 WHEELS = ("fl", "fr", "rl", "rr")
+SETTINGS = ("tc_level", "tc_cut_level", "abs_level", "engine_map", "brake_bias_raw")
 FIELDS = [
     "elapsed_s", "lap_time_s", "lap_number", "position_normalized",
     "speed_kmh", "throttle", "brake", "steer", "gear", "rpm", "fuel",
@@ -18,7 +20,7 @@ FIELDS = [
     "x", "y", "z", "velocity_x", "velocity_y", "velocity_z",
     "acc_g_x", "acc_g_y", "acc_g_z",
     "angular_velocity_local_x", "angular_velocity_local_y", "angular_velocity_local_z",
-] + [f"{name}_{wheel}" for name in
+] + list(SETTINGS) + [f"{name}_{wheel}" for name in
      ("wheel_slip", "tyre_pressure", "tyre_core_temp_c", "brake_temp_c")
      for wheel in WHEELS]
 
@@ -38,6 +40,9 @@ def telemetry_sample(physics, graphics):
         "in_pit_lane": graphics.isInPitLane, "sector": graphics.currentSectorIndex,
         "physics_packet": physics.packet_id, "graphics_packet": graphics.packet_id,
         "x": "", "y": "", "z": "",
+        "tc_level": graphics.TC, "tc_cut_level": graphics.TCCUT,
+        "abs_level": graphics.ABS, "engine_map": graphics.EngineMap,
+        "brake_bias_raw": round(physics.brakeBias, 6),
     }
     for i in range(max(0, min(graphics.activeCars, 60))):
         if graphics.carID[i] == graphics.playerCarID:
@@ -55,7 +60,7 @@ def telemetry_sample(physics, graphics):
 
 
 class Recorder:
-    def __init__(self, output, hz=20, demo=False):
+    def __init__(self, output, hz=20, demo=False, setup_path=None, setup_label=None):
         self.output = Path(output).resolve()
         self.hz = hz
         self.demo = demo
@@ -65,6 +70,22 @@ class Recorder:
         self.previous = None
         self.best_ms = None
         self.message = "Waiting for session"
+        self.setup_bytes = None
+        self.setup_info = {"label": setup_label, "file": None,
+                           "association": "user_declared" if setup_label else "unknown",
+                           "active_in_game_verified": False}
+        if setup_path is not None:
+            source = Path(setup_path).resolve()
+            self.setup_bytes = source.read_bytes()
+            setup = json.loads(self.setup_bytes.decode("utf-8-sig"))
+            if not isinstance(setup, dict):
+                raise ValueError("ACC setup JSON must contain an object")
+            self.setup_info.update({
+                "label": setup_label or source.stem, "file": "setup.json",
+                "original_filename": source.name,
+                "sha256": hashlib.sha256(self.setup_bytes).hexdigest(),
+                "association": "user_declared", "car_in_file": setup.get("carName"),
+            })
 
     def _metadata(self):
         temporary = self.directory / "session.json.tmp"
@@ -79,13 +100,16 @@ class Recorder:
         name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f") + "_" + track
         self.directory = self.output / name
         self.directory.mkdir()
+        if self.setup_bytes is not None:
+            (self.directory / "setup.json").write_bytes(self.setup_bytes)
         self.started = time.monotonic()
         self.best_ms = None
         self.metadata = {
-            "schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
+            "schema_version": 2, "started_at": datetime.now(timezone.utc).isoformat(),
             "car": identity[0], "track": identity[1], "session_type": identity[2],
             "session_index": identity[3], "polling_hz": self.hz, "demo": self.demo,
             "laps": [], "best_lap": None,
+            "setup": dict(self.setup_info),
             "notes": "Independent physics/graphics snapshots; start/finish sampled at polling rate. "
                      "TC/ABS are raw physics channels. Gear -1=R, 0=N. Wheel order FL/FR/RL/RR. "
                      "Validity is aggregated from observed samples; no inferred final-line validity.",
@@ -105,6 +129,10 @@ class Recorder:
         self.pit = False
         self.gap = False
         self.last_flush = time.monotonic()
+        self.settings_start = {key: sample[key] for key in SETTINGS}
+        self.settings_end = dict(self.settings_start)
+        self.settings_changes = []
+        self.start_fuel = sample["fuel"]
 
     def _finish(self, crossed=False, lap_ms=None, reason="interrupted"):
         if self.file is None:
@@ -119,7 +147,10 @@ class Recorder:
                 "complete": complete, "valid": self.valid, "contains_pit": self.pit,
                 "samples": self.rows, "lap_time_ms": lap_ms if crossed else None,
                 "reason": "finished" if complete else reason if not crossed else
-                          "missing_start_or_samples"}
+                          "missing_start_or_samples",
+                "setup": dict(self.setup_info), "fuel_at_recording_start_raw": self.start_fuel,
+                "settings_start": self.settings_start, "settings_end": self.settings_end,
+                "settings_changes": self.settings_changes}
         self.metadata["laps"].append(info)
         if complete and self.valid and not self.pit and lap_ms and lap_ms > 0:
             if self.best_ms is None or lap_ms < self.best_ms:
@@ -189,6 +220,11 @@ class Recorder:
             self._start_lap(sample, boundary=False)
         self.valid = self.valid and bool(sample["is_valid_lap"])
         self.pit = self.pit or bool(sample["in_pit"] or sample["in_pit_lane"])
+        settings = {key: sample[key] for key in SETTINGS}
+        if settings != self.settings_end:
+            self.settings_changes.append({"lap_time_s": sample["lap_time_s"],
+                                          "values": settings})
+            self.settings_end = settings
         row = dict(sample, elapsed_s=round(time.monotonic() - self.started, 6))
         self.writer.writerow(row)
         self.rows += 1

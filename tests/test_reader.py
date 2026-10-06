@@ -29,14 +29,16 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual([gear_label(n) for n in range(4)], ["R", "N", "1", "2"])
 
     def test_extended_binary_channels(self):
-        raw = bytearray(364)
+        raw = bytearray(568)
         struct.pack_into("<f", raw, 204, 0.4)
         struct.pack_into("<f", raw, 252, 0.6)
         struct.pack_into("<4f", raw, 348, 400, 401, 402, 403)
+        struct.pack_into("<f", raw, 564, 0.55)
         physics = Physics.from_buffer_copy(raw)
         self.assertAlmostEqual(physics.tc, 0.4, places=6)
         self.assertAlmostEqual(physics.abs, 0.6, places=6)
         self.assertEqual(list(physics.brakeTemp), [400, 401, 402, 403])
+        self.assertAlmostEqual(physics.brakeBias, 0.55, places=6)
         raw = bytearray(1412)
         struct.pack_into("<i", raw, 132, 4)
         struct.pack_into("<ii", raw, 140, 1234, 90000)

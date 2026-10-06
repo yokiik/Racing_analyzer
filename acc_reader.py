@@ -67,6 +67,15 @@ class Physics(c.LittleEndianStructure):
         ("drsAvailable", c.c_int32),
         ("drsEnabled", c.c_int32),
         ("brakeTemp", (c.c_float * 4)),
+        ("clutch", c.c_float),
+        ("tyreTempI", (c.c_float * 4)),
+        ("tyreTempM", (c.c_float * 4)),
+        ("tyreTempO", (c.c_float * 4)),
+        ("isAIControlled", c.c_int32),
+        ("tyreContactPoint", ((c.c_float * 3) * 4)),
+        ("tyreContactNormal", ((c.c_float * 3) * 4)),
+        ("tyreContactHeading", ((c.c_float * 3) * 4)),
+        ("brakeBias", c.c_float),
     ]
 
 
@@ -260,10 +269,16 @@ def main():
                         metavar="20..50", help="Polling frequency (default: 20)")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "sessions",
                         help="Recording folder (default: sessions beside the script)")
+    parser.add_argument("--setup", type=Path, help="Saved ACC setup JSON used for this run")
+    parser.add_argument("--setup-label", help="Setup name, e.g. aggressive or my_monza_v1")
     args = parser.parse_args()
     if not args.demo and sys.platform != "win32":
         parser.exit(1, "ACC shared memory requires Windows. Use --demo on this computer.\n")
-    recorder = Recorder(args.output, args.hz, demo=args.demo)
+    try:
+        recorder = Recorder(args.output, args.hz, demo=args.demo,
+                            setup_path=args.setup, setup_label=args.setup_label)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Cannot load setup: {error}\n")
     try:
         if args.demo:
             print("DEMO: synthetic data, no connection to ACC")

@@ -1,4 +1,4 @@
-"""First ACC Coach step: read existing Windows shared memory, read-only."""
+"""ACC Coach: live telemetry and automatic per-lap CSV recording."""
 
 import argparse
 import ctypes as c
@@ -6,18 +6,67 @@ import math
 import sys
 import time
 from contextlib import ExitStack
+from pathlib import Path
+
+from recorder import Recorder, telemetry_sample
 
 
-# Only the prefixes needed for this step. Windows wchar_t is always 2 bytes,
+# Prefixes through brake temperatures and lap validity. Windows wchar_t is always 2 bytes,
 # unlike ctypes.c_wchar on macOS. ACC uses 4-byte structure alignment.
 class Physics(c.LittleEndianStructure):
     _layout_ = "ms"
     _pack_ = 4
     _fields_ = [
-        ("packet_id", c.c_int32), ("throttle", c.c_float),
-        ("brake", c.c_float), ("fuel", c.c_float),
-        ("gear", c.c_int32), ("rpm", c.c_int32),
-        ("steer", c.c_float), ("speed", c.c_float),
+        ("packet_id", c.c_int32),
+        ("throttle", c.c_float),
+        ("brake", c.c_float),
+        ("fuel", c.c_float),
+        ("gear", c.c_int32),
+        ("rpm", c.c_int32),
+        ("steer", c.c_float),
+        ("speed", c.c_float),
+        ("velocity", (c.c_float * 3)),
+        ("accG", (c.c_float * 3)),
+        ("wheelSlip", (c.c_float * 4)),
+        ("wheelLoad", (c.c_float * 4)),
+        ("wheelPressure", (c.c_float * 4)),
+        ("wheelAngularSpeed", (c.c_float * 4)),
+        ("tyreWear", (c.c_float * 4)),
+        ("tyreDirtyLevel", (c.c_float * 4)),
+        ("TyreCoreTemp", (c.c_float * 4)),
+        ("camberRAD", (c.c_float * 4)),
+        ("suspensionTravel", (c.c_float * 4)),
+        ("drs", c.c_float),
+        ("tc", c.c_float),
+        ("heading", c.c_float),
+        ("pitch", c.c_float),
+        ("roll", c.c_float),
+        ("cgHeight", c.c_float),
+        ("carDamage", (c.c_float * 5)),
+        ("numberOfTyresOut", c.c_int32),
+        ("pitLimiterOn", c.c_int32),
+        ("abs", c.c_float),
+        ("kersCharge", c.c_float),
+        ("kersInput", c.c_float),
+        ("autoshifterOn", c.c_int32),
+        ("rideHeight", (c.c_float * 2)),
+        ("turboBoost", c.c_float),
+        ("ballast", c.c_float),
+        ("airDensity", c.c_float),
+        ("airTemp", c.c_float),
+        ("roadTemp", c.c_float),
+        ("localAngularVel", (c.c_float * 3)),
+        ("finalFF", c.c_float),
+        ("perfomanceMeter", c.c_float),
+        ("engineBrake", c.c_int32),
+        ("ersRecoveryLevel", c.c_int32),
+        ("ersPowerLevel", c.c_int32),
+        ("ersHeatCharging", c.c_int32),
+        ("ersIsCharging", c.c_int32),
+        ("kersCurrentKJ", c.c_float),
+        ("drsAvailable", c.c_int32),
+        ("drsEnabled", c.c_int32),
+        ("brakeTemp", (c.c_float * 4)),
     ]
 
 
@@ -25,8 +74,65 @@ class Graphics(c.LittleEndianStructure):
     _layout_ = "ms"
     _pack_ = 4
     _fields_ = [
-        ("packet_id", c.c_int32), ("status", c.c_int32),
+        ("packet_id", c.c_int32),
+        ("status", c.c_int32),
         ("session", c.c_int32),
+        ("currentTime", (c.c_uint16 * 15)),
+        ("lastTime", (c.c_uint16 * 15)),
+        ("bestTime", (c.c_uint16 * 15)),
+        ("split", (c.c_uint16 * 15)),
+        ("completedLaps", c.c_int32),
+        ("position", c.c_int32),
+        ("iCurrentTime", c.c_int32),
+        ("iLastTime", c.c_int32),
+        ("iBestTime", c.c_int32),
+        ("sessionTimeLeft", c.c_float),
+        ("distanceTraveled", c.c_float),
+        ("isInPit", c.c_int32),
+        ("currentSectorIndex", c.c_int32),
+        ("lastSectorTime", c.c_int32),
+        ("numberOfLaps", c.c_int32),
+        ("tyreCompound", (c.c_uint16 * 33)),
+        ("replayTimeMultiplier", c.c_float),
+        ("normalizedCarPosition", c.c_float),
+        ("activeCars", c.c_int32),
+        ("carCoordinates", ((c.c_float * 3) * 60)),
+        ("carID", (c.c_int32 * 60)),
+        ("playerCarID", c.c_int32),
+        ("penaltyTime", c.c_float),
+        ("flag", c.c_int32),
+        ("penalty", c.c_int32),
+        ("idealLineOn", c.c_int32),
+        ("isInPitLane", c.c_int32),
+        ("surfaceGrip", c.c_float),
+        ("mandatoryPitDone", c.c_int32),
+        ("windSpeed", c.c_float),
+        ("windDirection", c.c_float),
+        ("isSetupMenuVisible", c.c_int32),
+        ("mainDisplayIndex", c.c_int32),
+        ("secondaryDisplyIndex", c.c_int32),
+        ("TC", c.c_int32),
+        ("TCCUT", c.c_int32),
+        ("EngineMap", c.c_int32),
+        ("ABS", c.c_int32),
+        ("fuelXLap", c.c_float),
+        ("rainLights", c.c_int32),
+        ("flashingLights", c.c_int32),
+        ("lightsStage", c.c_int32),
+        ("exhaustTemperature", c.c_float),
+        ("wiperLV", c.c_int32),
+        ("driverStintTotalTimeLeft", c.c_int32),
+        ("driverStintTimeLeft", c.c_int32),
+        ("rainTyres", c.c_int32),
+        ("sessionIndex", c.c_int32),
+        ("usedFuel", c.c_float),
+        ("deltaLapTime", (c.c_uint16 * 15)),
+        ("iDeltaLapTime", c.c_int32),
+        ("estimatedLapTime", (c.c_uint16 * 15)),
+        ("iEstimatedLapTime", c.c_int32),
+        ("isDeltaPositive", c.c_int32),
+        ("iSplit", c.c_int32),
+        ("isValidLap", c.c_int32),
     ]
 
 
@@ -95,7 +201,7 @@ class SharedPage:
         self.api.CloseHandle(self.handle)
 
 
-def run_live(hz):
+def run_live(hz, recorder):
     previous_width = 0
     while True:
         try:
@@ -114,18 +220,25 @@ def run_live(hz):
                         graphics = graphics_page.read()
                         physics = physics_page.read()
                         static = static_page.read()
+                        if graphics_page.read().packet_id != graphics.packet_id:
+                            time.sleep(1 / hz)
+                            continue
                     except RuntimeError:
                         time.sleep(1 / hz)
                         continue
                     if graphics.packet_id != last_packet:
                         last_packet = graphics.packet_id
                         last_change = time.monotonic()
-                    if time.monotonic() - last_change > 5:
+                    if graphics.status != 3 and time.monotonic() - last_change > 5:
                         print("\nACC stopped updating. Reconnecting...")
+                        recorder.reset("connection_stale")
                         break
+                    recorder.accept(decode_text(static.car), decode_text(static.track),
+                                    graphics, telemetry_sample(physics, graphics))
                     if graphics.status == 2:
                         line = format_telemetry(decode_text(static.car),
                                                 decode_text(static.track), physics)
+                        line += " | " + recorder.message
                     else:
                         line = {0: "ACC: waiting for a session", 1: "ACC: replay",
                                 3: "ACC: paused"}.get(graphics.status, "ACC: unknown status")
@@ -133,6 +246,7 @@ def run_live(hz):
                     previous_width = len(line)
                     time.sleep(1 / hz)
         except OSError as error:
+            recorder.reset("connection_error")
             if getattr(error, "winerror", None) != 2:
                 raise
             print("\rWaiting for ACC. Start the game and enter a session.", flush=True)
@@ -144,27 +258,40 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Show synthetic data on any OS")
     parser.add_argument("--hz", type=int, choices=range(20, 51), default=20,
                         metavar="20..50", help="Polling frequency (default: 20)")
+    parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "sessions",
+                        help="Recording folder (default: sessions beside the script)")
     args = parser.parse_args()
     if not args.demo and sys.platform != "win32":
         parser.exit(1, "ACC shared memory requires Windows. Use --demo on this computer.\n")
+    recorder = Recorder(args.output, args.hz, demo=args.demo)
     try:
         if args.demo:
             print("DEMO: synthetic data, no connection to ACC")
             start = time.monotonic()
             while True:
                 t = time.monotonic() - start
-                physics = Physics(speed=184 + 20 * math.sin(t),
+                lap_t = t % 8
+                graphics = Graphics(status=2, session=3, completedLaps=int(t // 8),
+                                    iCurrentTime=int(lap_t * 1000), iLastTime=8000,
+                                    normalizedCarPosition=lap_t / 8, isValidLap=1,
+                                    packet_id=int(t * args.hz))
+                physics = Physics(packet_id=int(t * args.hz), speed=184 + 20 * math.sin(t),
                                   throttle=(1 + math.sin(t)) / 2,
                                   brake=0, gear=5, rpm=6500)
-                print("\r" + format_telemetry("porsche_991ii_gt3_r", "monza", physics),
+                recorder.accept("porsche_991ii_gt3_r", "demo_monza", graphics,
+                                telemetry_sample(physics, graphics))
+                print("\r" + format_telemetry("porsche_991ii_gt3_r", "demo_monza", physics)
+                      + " | " + recorder.message,
                       end="", flush=True)
                 time.sleep(1 / args.hz)
         else:
-            run_live(args.hz)
+            run_live(args.hz, recorder)
     except KeyboardInterrupt:
         print("\nStopped.")
     except OSError as error:
-        parser.exit(1, f"Cannot read ACC shared memory: {error}\n")
+        parser.exit(1, f"Cannot read or save ACC telemetry: {error}\n")
+    finally:
+        recorder.close()
 
 
 if __name__ == "__main__":

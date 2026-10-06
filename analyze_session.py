@@ -6,6 +6,7 @@ import csv
 import html
 import json
 import math
+import statistics
 from pathlib import Path
 
 # Working zones calibrated against the user's 2026-10-06 ACC Monza recording.
@@ -28,7 +29,11 @@ NUMERIC = ('lap_time_s', 'position_normalized', 'speed_kmh', 'throttle', 'brake'
 
 
 class LapTrace:
-    def __init__(self, rows, lap_ms):
+    def __init__(self, rows, lap_ms, hz=20):
+        if not isinstance(hz, (int, float)) or not math.isfinite(hz) or hz <= 0:
+            raise ValueError('invalid polling frequency')
+        tolerance = max(.15, 3 / hz)
+        self.normalization = None
         self.rows = []
         for raw in rows:
             row = {k: float(raw[k]) for k in NUMERIC}
@@ -59,22 +64,41 @@ class LapTrace:
             raise ValueError('not enough distinct samples')
         first, last = self.rows[0], self.rows[-1]
         self.lap_s = lap_ms / 1000
-        if (first['lap_time_s'] > .25 or first['position_normalized'] > .005
-                or last['position_normalized'] < .995
-                or not 0 <= self.lap_s - last['lap_time_s'] <= 1):
-            raise ValueError('start or finish coverage is incomplete')
-        # Timing at the finish is known from ACC. Boundary speed is a nearest
-        # sample estimate at the very short missing start/finish tails.
-        if first['position_normalized'] > 0:
-            self.rows.insert(0, dict(first, position_normalized=0, lap_time_s=0))
-        elif first['lap_time_s'] != 0:
-            raise ValueError('position zero does not correspond to time zero')
-        if last['position_normalized'] < 1:
-            self.rows.append(dict(last, position_normalized=1, lap_time_s=self.lap_s))
-        elif abs(last['lap_time_s'] - self.lap_s) > .25:
-            raise ValueError('finish timing is inconsistent')
-        else:
-            self.rows[-1] = dict(last, lap_time_s=self.lap_s)
+        if not math.isfinite(self.lap_s) or self.lap_s <= 0:
+            raise ValueError('invalid lap_time_ms')
+        start_t, start_p = first['lap_time_s'], first['position_normalized']
+        second, penultimate = self.rows[1], self.rows[-2]
+        start_rate = (second['position_normalized'] - start_p) / (second['lap_time_s'] - start_t)
+        end_rate = (last['position_normalized'] - penultimate['position_normalized']) / (last['lap_time_s'] - penultimate['lap_time_s'])
+        position_tolerance = min(.005, max(start_rate, end_rate) * tolerance + .0001)
+        offset = start_t - start_p / start_rate
+        inferred_end = last['lap_time_s'] + (1 - last['position_normalized']) / end_rate
+        if (start_t > tolerance or start_p > position_tolerance
+                or 1 - last['position_normalized'] > position_tolerance
+                or abs(offset) > tolerance
+                or abs(inferred_end - offset - self.lap_s) > 2 * tolerance
+                or not -tolerance <= self.lap_s - (last['lap_time_s'] - offset) <= 2 * tolerance):
+            raise ValueError('start or finish coverage/timing is incomplete')
+        self.normalization = {'method': 'local_linear_boundary_estimate',
+                              'time_offset_s': offset, 'tolerance_s': tolerance,
+                              'position_tolerance': position_tolerance,
+                              'inferred_duration_s': inferred_end - offset}
+        for row in self.rows:
+            row['lap_time_s'] -= offset
+        # Infer values at the line with local linear interpolation/extrapolation;
+        # discrete pedal and intervention signals retain their nearest sample.
+        def boundary(left, right, position, timing):
+            ratio = (position - left['position_normalized']) / (right['position_normalized'] - left['position_normalized'])
+            out = dict(left)
+            for key in ('speed_kmh', *OPTIONAL):
+                if left[key] is not None and right[key] is not None:
+                    out[key] = left[key] + ratio * (right[key] - left[key])
+            out.update(position_normalized=position, lap_time_s=timing)
+            return out
+        start = boundary(self.rows[0], self.rows[1], 0, 0)
+        finish = boundary(self.rows[-2], self.rows[-1], 1, self.lap_s)
+        self.rows = [start] + [r for r in self.rows if 0 < r['position_normalized'] < 1
+                                 and 0 < r['lap_time_s'] < self.lap_s] + [finish]
         self.positions = [r['position_normalized'] for r in self.rows]
 
     def at(self, position):
@@ -233,19 +257,29 @@ def load_trace(directory, info):
     if path.name != info['file'] or not path.resolve().is_relative_to(directory.resolve()):
         raise ValueError('lap file must be inside the session directory')
     with path.open(newline='', encoding='utf-8-sig') as f:
-        return LapTrace(list(csv.DictReader(f)), info['lap_time_ms'])
+        trace = LapTrace(list(csv.DictReader(f)), info['lap_time_ms'], info.get('polling_hz', 20))
+    for key, index in (('start_line_sample', 0), ('finish_line_sample', -1)):
+        line = info.get(key)
+        if line:
+            for field in ('speed_kmh', *OPTIONAL):
+                value = line.get(field)
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    trace.rows[index][field] = value
+            trace.normalization[key] = 'interpolated_across_position_wrap'
+    return trace
 
 
 def build_analysis(directory):
     directory = Path(directory)
     session = json.loads((directory / 'session.json').read_text(encoding='utf-8-sig'))
-    report = {'schema_version': 2, 'car': session['car'], 'track': session['track'],
+    report = {'schema_version': 3, 'car': session['car'], 'track': session['track'],
               'profile': 'monza_working_zones_v1', 'profile_status': 'approximate_calibrated_zones',
               'thresholds': THRESHOLDS, 'reference_file': None, 'laps': [], 'excluded': [],
+              'lap_validation': [], 'corner_delta_summary': [],
               'notes': ['Zone boundaries are fixed comparison windows, not surveyed corner entry/exit.',
                         'Delta = this zone time minus best valid lap zone time; positive is slower.',
                         'TC/ABS duration = raw physics signal > 0, held until the next sample.',
-                        'No inferred driving mistake or cause. Best complete valid lap is selected before telemetry checks.',
+                        'Reference = fastest complete game-valid non-pit lap with usable telemetry; fallback is explicit.',
                         'First/full throttle require rising edges and sustained thresholds; absent events are null.',
                         'Straight sections are included so zone deltas account for whole-lap delta.']}
     if session.get('recovered'):
@@ -257,29 +291,46 @@ def build_analysis(directory):
     # Select from authoritative lap metadata BEFORE telemetry quality filtering.
     # Missing/poor telemetry must not silently substitute a slower lap.
     candidates = [i for i in session['laps'] if i.get('complete') is True
-                  and i.get('valid') is True
+                  and i.get('valid') is True and i.get('contains_pit') is False
                   and isinstance(i.get('lap_time_ms'), (int, float))
                   and math.isfinite(i['lap_time_ms']) and i['lap_time_ms'] > 0]
     chosen = min(candidates, key=lambda i: i['lap_time_ms']) if candidates else None
     report['reference_candidates'] = [{'file': i['file'], 'lap_time_ms': i['lap_time_ms']} for i in candidates]
     traces = {}
     for info in session['laps']:
+        validation = {'file': info['file'], 'game_valid': info.get('valid') is True,
+                      'complete': info.get('complete') is True, 'contains_pit': info.get('contains_pit'),
+                      'telemetry_valid': False, 'telemetry_normalized': False,
+                      'telemetry_rejection_reason': None}
+        report['lap_validation'].append(validation)
+        info = dict(info, polling_hz=session.get('polling_hz', 20))
         if not info['complete'] or not info.get('lap_time_ms'):
+            validation['telemetry_rejection_reason'] = 'partial_or_unknown_time'
             report['excluded'].append({'file': info['file'], 'reason': 'partial_or_unknown_time'})
             continue
         try:
             trace = load_trace(directory, info)
         except (OSError, ValueError, KeyError, TypeError) as error:
+            validation['telemetry_rejection_reason'] = str(error)
             report['excluded'].append({'file': info['file'], 'reason': str(error)})
             continue
+        validation.update(telemetry_valid=True, telemetry_normalized=True, normalization=trace.normalization)
         traces[info['file']] = trace
         report['laps'].append({'file': info['file'], 'game_lap_number': info['game_lap_number'],
                                'lap_time_s': trace.lap_s, 'valid': info['valid'],
                                'contains_pit': info['contains_pit'], 'setup': info.get('setup'),
-                               'zones': metrics(trace)})
+                               'zones': metrics(trace), **validation})
     if chosen is None:
         report['status'] = 'no_valid_reference'
         return report
+    report['game_best_file'] = chosen['file']
+    report['game_best_lap_time_s'] = chosen['lap_time_ms'] / 1000
+    usable = [i for i in candidates if i['file'] in traces]
+    report['reference_fallback'] = bool(usable and chosen['file'] not in traces)
+    report['reference_fallback_reason'] = next((v['telemetry_rejection_reason'] for v in report['lap_validation']
+        if v['file'] == chosen['file']), None) if report['reference_fallback'] else None
+    if usable:
+        chosen = min(usable, key=lambda i: i['lap_time_ms'])
     report['reference_file'] = chosen['file']
     report['reference_lap_time_s'] = chosen['lap_time_ms'] / 1000
     reference = next((lap for lap in report['laps'] if lap['file'] == chosen['file']), None)
@@ -297,6 +348,37 @@ def build_analysis(directory):
                 'first_throttle', 'full_throttle', 'tc_active_s', 'abs_active_s',
                 'throttle_progression', 'tc_before_min_s', 'tc_after_min_s',
                 'abs_before_min_s', 'abs_after_min_s', 'steering')}
+        if lap['game_valid'] and lap['complete'] and lap['contains_pit'] is False:
+            deltas = {z['corner_numbers'] or z['name']: z['delta_s'] for z in lap['zones']}
+            report['corner_delta_summary'].append({'file': lap['file'],
+                'reference_file': chosen['file'], 'lap_time_s': lap['lap_time_s'],
+                'total_delta_s': lap['delta_s'], 'zone_deltas_s': deltas,
+                'sum_zone_delta_s': round(sum(deltas.values()), 4)})
+    eligible = [lap for lap in report['laps'] if lap['game_valid'] and lap['complete']
+                and lap['contains_pit'] is False]
+    report['corner_stability'] = []
+    theoretical = []
+    for index, (name, _, _, corner) in enumerate(MONZA):
+        zones = [lap['zones'][index] for lap in eligible]
+        if not zones:
+            continue
+        def spread(values):
+            values = [v for v in values if v is not None]
+            return {'count': len(values), 'min': min(values) if values else None,
+                    'max': max(values) if values else None,
+                    'range': max(values) - min(values) if values else None,
+                    'stddev': statistics.pstdev(values) if values else None}
+        if corner:
+            item = {'label': zones[0]['label'], 'time_s': spread([z['time_s'] for z in zones]),
+                    'min_speed_kmh': spread([z['min_speed_kmh'] for z in zones])}
+            for key in ('brake_start', 'first_throttle', 'full_throttle'):
+                item[key + '_position'] = spread([z[key]['position_normalized'] if z[key] else None for z in zones])
+            report['corner_stability'].append(item)
+        winner = min(eligible, key=lambda lap: lap['zones'][index]['time_s'])
+        theoretical.append({'label': zones[0]['label'], 'source_file': winner['file'],
+                            'time_s': winner['zones'][index]['time_s']})
+    report['theoretical_best'] = {'time_s': round(sum(z['time_s'] for z in theoretical), 4),
+                                'zones': theoretical} if theoretical else None
     return report
 
 
@@ -383,9 +465,41 @@ def render_html(report):
         parts.append(f"<p>Лучший: {esc(report['reference_file'])} · {report['reference_lap_time_s']:.3f} с</p>")
         if report['status'] == 'reference_telemetry_unavailable':
             parts.append('<p>Телеметрия настоящего лучшего круга не прошла проверку или отсутствует. '
-                         'Дельты поворотов недоступны; более медленный круг не подставляется. Причина — в списке исключений.</p>')
+                         'Дельты поворотов недоступны: подходящего запасного круга нет. Причина — в списке исключений.</p>')
     else:
         parts.append('<p>Пока нет подходящего лучшего круга. Сравнение появится после полного валидного круга Monza.</p>')
+    if report.get('reference_fallback'):
+        parts.append(f"<p>Fallback: лучший игровой круг {esc(report['game_best_file'])} не прошёл проверку телеметрии. "
+                     f"Сравнение выполнено с {esc(report['reference_file'])}; причина указана в исключениях.</p>")
+    if report.get('corner_delta_summary'):
+        columns = list(report['corner_delta_summary'][0]['zone_deltas_s'])
+        parts.append('<h2>Дельты всех пригодных кругов</h2><div class="scroll"><table><tr><th>Круг</th>')
+        parts.extend(f'<th>{esc(c)}</th>' for c in columns)
+        parts.append('<th>Итого, с</th></tr>')
+        for row in report['corner_delta_summary']:
+            parts.append(f"<tr><td>{esc(row['file'])}</td>")
+            parts.extend(f"<td>{row['zone_deltas_s'][c]:+.3f}</td>" for c in columns)
+            parts.append(f"<td>{row['total_delta_s']:+.3f}</td></tr>")
+        parts.append('</table></div>')
+    if report.get('corner_stability'):
+        parts.append('<h2>Стабильность по поворотам</h2><p>Разброс = максимум − минимум. '
+                     'Точки педалей указаны в процентных пунктах трассы; пропущенные события исключены, число наблюдений — в скобках.</p>'
+                     '<div class="scroll"><table><tr><th>Поворот</th><th>Время, с</th><th>Min скорость, км/ч</th>'
+                     '<th>Тормоз</th><th>Первый газ</th><th>Полный газ</th></tr>')
+        for item in report['corner_stability']:
+            parts.append(f"<tr><td>{esc(item['label'])}</td>")
+            for key in ('time_s', 'min_speed_kmh', 'brake_start_position', 'first_throttle_position', 'full_throttle_position'):
+                stat = item[key]
+                value = '—' if stat['range'] is None else f"{stat['range'] * (100 if key.endswith('_position') else 1):.3f} ({stat['count']})"
+                parts.append(f'<td>{value}</td>')
+            parts.append('</tr>')
+        parts.append('</table></div>')
+    if report.get('theoretical_best'):
+        best = report['theoretical_best']
+        parts.append(f"<h2>Theoretical best: {best['time_s']:.3f} с</h2><p>Сумма лучших зон, включая прямые, "
+                     'по полным валидным кругам без боксов. Это составной результат, достижимость не гарантирована.</p><ul>')
+        parts.extend(f"<li>{esc(z['label'])}: {z['time_s']:.3f} с — {esc(z['source_file'])}</li>" for z in best['zones'])
+        parts.append('</ul>')
     if report.get('track_map'):
         parts.append(render_track_map(report['track_map']))
     parts.append('<p>Новые показатели: ступени газа относятся к первому устойчивому открытию в зоне, '

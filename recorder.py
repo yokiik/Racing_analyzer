@@ -128,7 +128,8 @@ class Recorder:
         self._metadata()
         print(f"\nRecording to: {self.directory}")
 
-    def _start_lap(self, sample, boundary):
+    def _start_lap(self, sample, boundary, line_sample=None):
+        self.start_line_sample = line_sample
         self.lap_number = sample["lap_number"]
         self.path = self.directory / f"lap_{len(self.metadata['laps']) + 1:02d}.recording.csv"
         self.file = self.path.open("w", newline="", encoding="utf-8")
@@ -145,7 +146,7 @@ class Recorder:
         self.settings_changes = []
         self.start_fuel = sample["fuel"]
 
-    def _finish(self, crossed=False, lap_ms=None, reason="interrupted"):
+    def _finish(self, crossed=False, lap_ms=None, reason="interrupted", line_sample=None):
         if self.file is None:
             return
         self.file.close()
@@ -157,13 +158,14 @@ class Recorder:
         info = {"file": path.name, "game_lap_number": self.lap_number,
                 "complete": complete, "valid": self.valid, "contains_pit": self.pit,
                 "samples": self.rows, "lap_time_ms": lap_ms if crossed else None,
+                "start_line_sample": self.start_line_sample, "finish_line_sample": line_sample,
                 "reason": "finished" if complete else reason if not crossed else
                           "missing_start_or_samples",
                 "setup": dict(self.setup_info), "fuel_at_recording_start_raw": self.start_fuel,
                 "settings_start": self.settings_start, "settings_end": self.settings_end,
                 "settings_changes": self.settings_changes}
         self.metadata["laps"].append(info)
-        if complete and self.valid and lap_ms and lap_ms > 0:
+        if complete and self.valid and not self.pit and lap_ms and lap_ms > 0:
             if self.best_ms is None or lap_ms < self.best_ms:
                 self.best_ms = lap_ms
                 shutil.copyfile(path, self.directory / "best_lap.csv")
@@ -225,10 +227,22 @@ class Recorder:
                 self._session(identity)
                 previous = None
             elif delta_laps == 1:
+                # Counter/time can update before the spatial page crosses the line.
+                if sample['position_normalized'] > .98 and sample['lap_time_s'] <= .25:
+                    return
+                line = None
+                if previous['position_normalized'] > .98 and sample['position_normalized'] < .02:
+                    distance = 1 - previous['position_normalized'] + sample['position_normalized']
+                    fraction = (1 - previous['position_normalized']) / distance if distance else 0
+                    line = dict(previous)
+                    for key in ('speed_kmh', 'steer', 'x', 'z'):
+                        if isinstance(previous[key], (int, float)) and isinstance(sample[key], (int, float)):
+                            line[key] = previous[key] + fraction * (sample[key] - previous[key])
+                    line.update(position_normalized=0, lap_time_s=0, crossing_fraction=fraction)
                 if graphics.iLastTime / 1000 - previous["lap_time_s"] > 1:
                     self.gap = True
-                self._finish(crossed=True, lap_ms=graphics.iLastTime)
-                self._start_lap(sample, boundary=True)
+                self._finish(crossed=True, lap_ms=graphics.iLastTime, line_sample=line)
+                self._start_lap(sample, boundary=True, line_sample=line)
             elif (sample["physics_packet"], sample["graphics_packet"]) == (
                 previous["physics_packet"], previous["graphics_packet"]
             ):

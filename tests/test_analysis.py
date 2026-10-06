@@ -44,6 +44,62 @@ class AnalysisTests(unittest.TestCase):
         (self.directory / 'session.json').write_text(json.dumps(
             dict(car='porsche_992_gt3_r', track=track, laps=self.infos)))
 
+    def test_discrete_zero_position_with_nonzero_timer_is_normalized(self):
+        samples = rows()
+        for r in samples:
+            r['lap_time_s'] += .05
+        trace = LapTrace(samples, 100000)
+        self.assertEqual(trace.rows[0]['lap_time_s'], 0)
+        self.assertEqual(trace.rows[-1]['lap_time_s'], 100)
+        self.assertAlmostEqual(trace.normalization['time_offset_s'], .05)
+        with self.assertRaises(ValueError):
+            LapTrace(samples[20:], 100000)
+        samples[100]['lap_time_s'] += 2
+        with self.assertRaises(ValueError):
+            LapTrace(samples, 100000)
+
+    def test_thirteen_laps_summary_stability_and_theoretical_best(self):
+        for number in range(1, 14):
+            seconds = 111.507 if number == 7 else 112 + number / 10
+            samples = rows()
+            for r in samples:
+                r['lap_time_s'] = r['lap_time_s'] * seconds / 100 + .05
+            self.add(f'lap_{number:02}.csv', samples, round(seconds * 1000))
+        report = write_analysis(self.directory)
+        self.assertEqual(report['reference_file'], 'lap_07.csv')
+        self.assertFalse(report['reference_fallback'])
+        self.assertEqual(len(report['corner_delta_summary']), 13)
+        for row in report['corner_delta_summary']:
+            self.assertAlmostEqual(row['sum_zone_delta_s'], row['total_delta_s'], places=3)
+        self.assertEqual(len(report['corner_stability']), 7)
+        self.assertEqual(report['corner_stability'][0]['time_s']['count'], 13)
+        self.assertAlmostEqual(report['theoretical_best']['time_s'], 111.507, places=3)
+        self.assertTrue(all(l['telemetry_valid'] and l['telemetry_normalized'] for l in report['lap_validation']))
+
+    def test_theoretical_best_combines_zones_from_different_laps(self):
+        self.add('steady.csv', rows(), 100000)
+        samples = rows(2)
+        for r in samples:
+            r['lap_time_s'] -= 3 * min(1, max(0, (r['position_normalized'] - .41) / .06))
+        self.add('mixed.csv', samples, 99000)
+        report = build_analysis(self.directory)
+        self.assertAlmostEqual(report['theoretical_best']['time_s'], 97, places=3)
+        self.assertEqual({z['source_file'] for z in report['theoretical_best']['zones']}, {'steady.csv', 'mixed.csv'})
+
+    def test_nonzero_sample_position_preserves_fixed_zone_alignment(self):
+        trace = LapTrace(rows(offset=.0003), 100000)
+        self.assertAlmostEqual(trace.normalization['time_offset_s'], 0)
+        self.assertEqual(trace.rows[0]['position_normalized'], 0)
+        self.assertAlmostEqual(trace.at(.1)['lap_time_s'], 10, places=3)
+
+    def test_pit_lap_excluded_from_reference_and_aggregate(self):
+        self.add('pit.csv', rows(), 100000)
+        self.infos[-1]['contains_pit'] = True
+        self.add('clean.csv', rows(1), 101000)
+        report = build_analysis(self.directory)
+        self.assertEqual(report['reference_file'], 'clean.csv')
+        self.assertEqual(len(report['corner_delta_summary']), 1)
+
     def test_known_corner_metrics_and_intervention_durations(self):
         zone = next(z for z in metrics(LapTrace(rows(), 100000)) if z['name'] == 'Rettifilo')
         self.assertEqual(zone['time_s'], 10)
@@ -138,7 +194,7 @@ class AnalysisTests(unittest.TestCase):
         report = json.loads((recorder.directory / 'analysis.json').read_text())
         self.assertTrue(any(x['file'] == 'lap_03.partial.csv' for x in report['excluded']))
 
-    def test_true_fastest_reference_is_not_replaced_by_slower_usable_lap(self):
+    def test_unusable_best_uses_explicit_fallback(self):
         fast = rows()
         fast[200]['position_normalized'] = .01
         self.add('lap_03.csv', fast, 112100)
@@ -147,12 +203,13 @@ class AnalysisTests(unittest.TestCase):
             r['lap_time_s'] *= 1.12327
         self.add('lap_04.csv', slow, 112327)
         report = write_analysis(self.directory)
-        self.assertEqual(report['reference_file'], 'lap_03.csv')
-        self.assertEqual(report['reference_lap_time_s'], 112.1)
-        self.assertEqual(report['status'], 'reference_telemetry_unavailable')
-        self.assertEqual(report['laps'][0]['delta_s'], .227)
-        self.assertNotIn('delta_s', report['laps'][0]['zones'][0])
-        self.assertIn('более медленный круг не подставляется', (self.directory / 'report.html').read_text())
+        self.assertEqual(report['reference_file'], 'lap_04.csv')
+        self.assertEqual(report['game_best_file'], 'lap_03.csv')
+        self.assertTrue(report['reference_fallback'])
+        self.assertEqual(report['status'], 'ok')
+        self.assertEqual(report['laps'][0]['delta_s'], 0)
+        self.assertIn('delta_s', report['laps'][0]['zones'][0])
+        self.assertIn('Fallback:', (self.directory / 'report.html').read_text())
 
     def test_fastest_full_valid_lap_with_reported_times(self):
         for filename, seconds, valid, complete in (

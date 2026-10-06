@@ -34,6 +34,18 @@ class RecorderTests(unittest.TestCase):
     def metadata(self):
         return json.loads((self.recorder.directory / "session.json").read_text())
 
+    def test_line_values_interpolate_across_spatial_wrap(self):
+        g = Graphics(status=2, completedLaps=0, iCurrentTime=89950,
+                     normalizedCarPosition=.9995, packet_id=1, isValidLap=1)
+        self.recorder.accept('porsche', 'monza', g, telemetry_sample(Physics(speed=200, packet_id=1), g))
+        g = Graphics(status=2, completedLaps=1, iCurrentTime=50, iLastTime=90000,
+                     normalizedCarPosition=.0005, packet_id=2, isValidLap=1)
+        self.recorder.accept('porsche', 'monza', g, telemetry_sample(Physics(speed=220, packet_id=2), g))
+        line = self.recorder.start_line_sample
+        self.assertAlmostEqual(line['speed_kmh'], 210, places=3)
+        self.assertAlmostEqual(line['crossing_fraction'], .5, places=4)
+        self.assertAlmostEqual(self.metadata()['laps'][0]['finish_line_sample']['speed_kmh'], 210, places=3)
+
     def test_partial_full_best_and_stop(self):
         self.feed(1, 89000)
         self.full_lap()
@@ -51,12 +63,12 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(rows[0]["lap_number"], "2")
         self.assertEqual(rows[0]["gear"], "4")
 
-    def test_invalid_not_best_and_full_valid_pit_lap_is_eligible(self):
+    def test_invalid_and_pit_laps_are_not_best(self):
         self.feed(1, 89000)
         self.full_lap(valid=0)
         self.assertIsNone(self.metadata()["best_lap"])
         self.full_lap(lap=3, pit=1)
-        self.assertEqual(self.metadata()["best_lap"]["file"], "lap_03.csv")
+        self.assertIsNone(self.metadata()["best_lap"])
 
     def test_pause_duplicates_and_replay(self):
         g, sample = self.feed(1, 30000)

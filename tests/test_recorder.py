@@ -113,6 +113,29 @@ class RecorderTests(unittest.TestCase):
         self.feed(2, 41000)
         self.assertNotEqual(directory, self.recorder.directory)
 
+    def test_acc_timer_resets_before_lap_counter(self):
+        self.feed(5, 113520)
+        self.feed(6, 52, last=113522)
+        directory = self.recorder.directory
+        for ms in range(102, 113383, 50):
+            self.feed(6, ms)
+        # Actual ACC transition from the user's Monza recording: timer is
+        # already 7ms, but lap count and normalized position still belong to lap 6.
+        self.recorder.previous["position_normalized"] = 0.9996869
+        g = Graphics(status=2, session=0, completedLaps=5, iCurrentTime=7,
+                     iLastTime=113425, normalizedCarPosition=1, isValidLap=1,
+                     packet_id=100000)
+        self.recorder.accept("porsche", "monza", g,
+                             telemetry_sample(Physics(packet_id=100000), g))
+        self.assertEqual(self.recorder.directory, directory)
+        self.assertEqual(self.recorder.previous["lap_number"], 6)
+        self.feed(7, 65, last=113425)
+        data = self.metadata()
+        self.assertEqual(len(data["laps"]), 2)
+        self.assertTrue(data["laps"][1]["complete"])
+        self.assertEqual(data["laps"][1]["lap_time_ms"], 113425)
+        self.assertEqual(data["best_lap"]["file"], "lap_02.csv")
+
 
 if __name__ == "__main__":
     unittest.main()

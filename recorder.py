@@ -151,6 +151,15 @@ class Recorder:
         previous = self.previous
         if previous is not None:
             delta_laps = sample["lap_number"] - previous["lap_number"]
+            # ACC can reset the timer one graphics update before completedLaps.
+            # Ignore that transitional snapshot and wait for the counter, keeping
+            # the last pre-finish sample for gap detection and the old lap intact.
+            if (delta_laps == 0 and previous["lap_time_s"] > 1
+                    and previous["position_normalized"] > 0.98
+                    and sample["lap_time_s"] <= 0.25
+                    and (sample["position_normalized"] > 0.98
+                         or sample["position_normalized"] < 0.02)):
+                return
             # Return to garage, restart, teleport or skipped laps: never join them.
             if delta_laps < 0 or delta_laps > 1 or (
                 delta_laps == 0 and sample["lap_time_s"] < previous["lap_time_s"] - 0.5

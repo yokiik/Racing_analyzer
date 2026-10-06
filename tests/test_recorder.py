@@ -136,6 +136,10 @@ class RecorderTests(unittest.TestCase):
         r.close()
         data = json.loads((r.directory / "session.json").read_text())
         self.assertEqual((r.directory / "setup.json").read_bytes(), original)
+        summary = json.loads((r.directory / "setup_summary.json").read_text())
+        self.assertEqual(summary['car'], 'porsche_992_gt3_r')
+        self.assertEqual(summary['fields'][-1]['value'], 3)
+        self.assertIn('ЭЛЕКТРОНИКА', (r.directory / 'setup_summary.txt').read_text())
         lap = data['laps'][0]
         self.assertEqual(lap['setup']['label'], 'my_monza')
         self.assertFalse(lap['setup']['active_in_game_verified'])

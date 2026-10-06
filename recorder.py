@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from setup_report import build_report, format_report
+
 
 WHEELS = ("fl", "fr", "rl", "rr")
 SETTINGS = ("tc_level", "tc_cut_level", "abs_level", "engine_map", "brake_bias_raw")
@@ -71,6 +73,7 @@ class Recorder:
         self.best_ms = None
         self.message = "Waiting for session"
         self.setup_bytes = None
+        self.setup_report = None
         self.setup_info = {"label": setup_label, "file": None,
                            "association": "user_declared" if setup_label else "unknown",
                            "active_in_game_verified": False}
@@ -80,11 +83,14 @@ class Recorder:
             setup = json.loads(self.setup_bytes.decode("utf-8-sig"))
             if not isinstance(setup, dict):
                 raise ValueError("ACC setup JSON must contain an object")
+            self.setup_report = build_report(setup)
             self.setup_info.update({
                 "label": setup_label or source.stem, "file": "setup.json",
                 "original_filename": source.name,
                 "sha256": hashlib.sha256(self.setup_bytes).hexdigest(),
                 "association": "user_declared", "car_in_file": setup.get("carName"),
+                "report_file": "setup_summary.json",
+                "readable_report_file": "setup_summary.txt",
             })
 
     def _metadata(self):
@@ -102,6 +108,10 @@ class Recorder:
         self.directory.mkdir()
         if self.setup_bytes is not None:
             (self.directory / "setup.json").write_bytes(self.setup_bytes)
+            (self.directory / "setup_summary.json").write_text(
+                json.dumps(self.setup_report, ensure_ascii=False, indent=2), encoding="utf-8")
+            (self.directory / "setup_summary.txt").write_text(
+                format_report(self.setup_report), encoding="utf-8")
         self.started = time.monotonic()
         self.best_ms = None
         self.metadata = {

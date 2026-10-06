@@ -163,7 +163,7 @@ class Recorder:
                 "settings_start": self.settings_start, "settings_end": self.settings_end,
                 "settings_changes": self.settings_changes}
         self.metadata["laps"].append(info)
-        if complete and self.valid and not self.pit and lap_ms and lap_ms > 0:
+        if complete and self.valid and lap_ms and lap_ms > 0:
             if self.best_ms is None or lap_ms < self.best_ms:
                 self.best_ms = lap_ms
                 shutil.copyfile(path, self.directory / "best_lap.csv")
